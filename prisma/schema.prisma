@@ -1,0 +1,203 @@
+// Prisma Schema for Ticket Booking System
+// Using SQLite for local development (swap to PostgreSQL for production)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── USERS & AUTH ────────────────────────────────────────────────────────────
+// Note: SQLite does not support enums. Role is stored as a String.
+// Valid roles: "ADMIN", "ORGANISER", "CUSTOMER"
+
+model User {
+  id            String    @id @default(uuid())
+  name          String
+  email         String    @unique
+  passwordHash  String
+  role          String    @default("CUSTOMER")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  events        Event[]       @relation("OrganiserEvents")
+  bookings      Booking[]
+  waitlistItems Waitlist[]
+}
+
+// ─── VENUES & SEAT LAYOUTS ──────────────────────────────────────────────────
+
+model Venue {
+  id          String   @id @default(uuid())
+  name        String
+  address     String
+  totalRows   Int
+  totalCols   Int
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  seatLayouts SeatLayout[]
+  events      Event[]
+}
+
+model SeatCategory {
+  id        String   @id @default(uuid())
+  name      String   // e.g. "Premium", "Standard", "Economy"
+  color     String   @default("#3B82F6") // hex color for seat map rendering
+  createdAt DateTime @default(now())
+
+  // Relations
+  seatLayouts   SeatLayout[]
+  eventPricings EventPricing[]
+  waitlistItems Waitlist[]
+}
+
+model SeatLayout {
+  id             String   @id @default(uuid())
+  venueId        String
+  seatCategoryId String
+  seatLabel      String   // e.g. "A1", "B5"
+  rowNum         Int
+  colNum         Int
+  isActive       Boolean  @default(true) // false = aisle / non-existent seat
+  createdAt      DateTime @default(now())
+
+  // Relations
+  venue        Venue        @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  seatCategory SeatCategory @relation(fields: [seatCategoryId], references: [id])
+  eventSeats   EventSeat[]
+
+  @@unique([venueId, rowNum, colNum])
+  @@index([venueId])
+}
+
+// ─── EVENTS ─────────────────────────────────────────────────────────────────
+
+model Event {
+  id          String       @id @default(uuid())
+  title       String
+  description String       @default("")
+  type        String       @default("MOVIE") // "MOVIE" or "CONCERT"
+  date        DateTime
+  time        String       // e.g. "19:30"
+  venueId     String
+  organiserId String
+  imageUrl    String       @default("")
+  isSoldOut   Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  // Relations
+  venue         Venue          @relation(fields: [venueId], references: [id])
+  organiser     User           @relation("OrganiserEvents", fields: [organiserId], references: [id])
+  eventSeats    EventSeat[]
+  eventPricings EventPricing[]
+  bookings      Booking[]
+  waitlistItems Waitlist[]
+
+  @@index([venueId])
+  @@index([organiserId])
+  @@index([date])
+}
+
+model EventPricing {
+  id             String @id @default(uuid())
+  eventId        String
+  seatCategoryId String
+  price          Float
+
+  event        Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  seatCategory SeatCategory @relation(fields: [seatCategoryId], references: [id])
+
+  @@unique([eventId, seatCategoryId])
+}
+
+// ─── EVENT SEATS (Per-show seat status) ──────────────────────────────────────
+
+model EventSeat {
+  id           String   @id @default(uuid())
+  eventId      String
+  seatLayoutId String
+  status       String   @default("AVAILABLE") // AVAILABLE | HELD | BOOKED
+  heldBy       String?  // userId if held
+  heldUntil    DateTime? // TTL expiry time
+  bookedBy     String?  // userId if booked
+  version      Int      @default(0) // optimistic concurrency control
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  event      Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  seatLayout SeatLayout @relation(fields: [seatLayoutId], references: [id])
+
+  @@unique([eventId, seatLayoutId])
+  @@index([eventId, status])
+}
+
+// ─── BOOKINGS & TICKETS ─────────────────────────────────────────────────────
+
+model Booking {
+  id              String   @id @default(uuid())
+  bookingRef      String   @unique @default(uuid())
+  userId          String
+  eventId         String
+  totalAmount     Float
+  status          String   @default("CONFIRMED") // CONFIRMED | CANCELLED
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  user         User          @relation(fields: [userId], references: [id])
+  event        Event         @relation(fields: [eventId], references: [id])
+  bookingItems BookingItem[]
+  ticket       Ticket?
+}
+
+model BookingItem {
+  id           String @id @default(uuid())
+  bookingId    String
+  seatLabel    String
+  categoryName String
+  price        Float
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+}
+
+model Ticket {
+  id         String   @id @default(uuid())
+  bookingId  String   @unique
+  qrCodeData String   // base64 encoded QR code image
+  createdAt  DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+}
+
+// ─── WAITLIST ───────────────────────────────────────────────────────────────
+
+model Waitlist {
+  id             String    @id @default(uuid())
+  userId         String
+  eventId        String
+  seatCategoryId String
+  status         String    @default("WAITING") // WAITING | OFFERED | EXPIRED | COMPLETED
+  offerToken     String?   @unique // secure token for time-limited offer
+  offerExpiresAt DateTime? // when the offer expires
+  position       Int       // queue position
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Relations
+  user         User         @relation(fields: [userId], references: [id])
+  event        Event        @relation(fields: [eventId], references: [id])
+  seatCategory SeatCategory @relation(fields: [seatCategoryId], references: [id])
+
+  @@index([eventId, seatCategoryId, status])
+  @@index([userId])
+}
